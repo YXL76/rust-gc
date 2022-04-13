@@ -6,22 +6,24 @@
 
 #![cfg_attr(feature = "nightly", feature(coerce_unsized, unsize))]
 
+extern crate alloc;
+
 use crate::gc::{GcBox, GcBoxHeader};
-use std::alloc::Layout;
-use std::cell::{Cell, UnsafeCell};
-use std::cmp::Ordering;
-use std::fmt::{self, Debug, Display};
-use std::hash::{Hash, Hasher};
-use std::marker::PhantomData;
-use std::mem;
-use std::ops::{Deref, DerefMut};
-use std::ptr::{self, NonNull};
-use std::rc::Rc;
+use alloc::rc::Rc;
+use core::alloc::Layout;
+use core::cell::{Cell, UnsafeCell};
+use core::cmp::Ordering;
+use core::fmt::{self, Debug, Display};
+use core::hash::{Hash, Hasher};
+use core::marker::PhantomData;
+use core::mem;
+use core::ops::{Deref, DerefMut};
+use core::ptr::{self, NonNull};
 
 #[cfg(feature = "nightly")]
-use std::marker::Unsize;
+use core::marker::Unsize;
 #[cfg(feature = "nightly")]
-use std::ops::CoerceUnsized;
+use core::ops::CoerceUnsized;
 
 mod gc;
 #[cfg(feature = "serde")]
@@ -362,13 +364,13 @@ impl<T: Trace> From<T> for Gc<T> {
     }
 }
 
-impl<T: Trace + ?Sized> std::borrow::Borrow<T> for Gc<T> {
+impl<T: Trace + ?Sized> core::borrow::Borrow<T> for Gc<T> {
     fn borrow(&self) -> &T {
         &**self
     }
 }
 
-impl<T: Trace + ?Sized> std::convert::AsRef<T> for Gc<T> {
+impl<T: Trace + ?Sized> core::convert::AsRef<T> for Gc<T> {
     fn as_ref(&self) -> &T {
         &**self
     }
@@ -603,8 +605,8 @@ impl<T: Trace + ?Sized> GcCell<T> {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Default, Hash)]
 pub struct BorrowError;
 
-impl std::fmt::Display for BorrowError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for BorrowError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         Display::fmt("GcCell<T> already mutably borrowed", f)
     }
 }
@@ -613,8 +615,8 @@ impl std::fmt::Display for BorrowError {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Default, Hash)]
 pub struct BorrowMutError;
 
-impl std::fmt::Display for BorrowMutError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for BorrowMutError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         Display::fmt("GcCell<T> already borrowed", f)
     }
 }
@@ -717,7 +719,7 @@ impl<'a, T: ?Sized> GcCellRef<'a, T> {
 
         // We have to tell the compiler not to call the destructor of GcCellRef,
         // because it will update the borrow flags.
-        std::mem::forget(orig);
+        core::mem::forget(orig);
 
         ret
     }
@@ -764,7 +766,7 @@ impl<'a, T: ?Sized> GcCellRef<'a, T> {
 
         // We have to tell the compiler not to call the destructor of GcCellRef,
         // because it will update the borrow flags.
-        std::mem::forget(orig);
+        core::mem::forget(orig);
 
         ret
     }
@@ -843,7 +845,7 @@ impl<'a, T: Trace + ?Sized, U: ?Sized> GcCellRefMut<'a, T, U> {
 
         // We have to tell the compiler not to call the destructor of GcCellRefMut,
         // because it will update the borrow flags.
-        std::mem::forget(orig);
+        core::mem::forget(orig);
 
         ret
     }

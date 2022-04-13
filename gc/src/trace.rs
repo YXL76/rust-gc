@@ -1,17 +1,21 @@
-use std::borrow::{Cow, ToOwned};
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, LinkedList, VecDeque};
-use std::hash::{BuildHasher, Hash};
-use std::marker::PhantomData;
-use std::num::{
+use alloc::borrow::{Cow, ToOwned};
+use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, BTreeSet, BinaryHeap, LinkedList, VecDeque};
+use alloc::rc::Rc;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::hash::{BuildHasher, Hash};
+use core::marker::PhantomData;
+use core::num::{
     NonZeroI128, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI8, NonZeroIsize, NonZeroU128,
     NonZeroU16, NonZeroU32, NonZeroU64, NonZeroU8, NonZeroUsize,
 };
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
-use std::sync::atomic::{
+use core::sync::atomic::{
     AtomicBool, AtomicI16, AtomicI32, AtomicI64, AtomicI8, AtomicIsize, AtomicU16, AtomicU32,
     AtomicU64, AtomicU8, AtomicUsize,
 };
+use hashbrown::{HashMap, HashSet};
+// use std::path::{Path, PathBuf};
 
 /// The Finalize trait, which needs to be implemented on
 /// garbage-collected objects to define finalization logic.
@@ -137,8 +141,8 @@ simple_empty_finalize_trace![
     String,
     Box<str>,
     Rc<str>,
-    Path,
-    PathBuf,
+    // Path,
+    // PathBuf,
     NonZeroIsize,
     NonZeroUsize,
     NonZeroI8,

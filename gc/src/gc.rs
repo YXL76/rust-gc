@@ -1,7 +1,7 @@
 use crate::trace::Trace;
-use std::cell::{Cell, RefCell};
-use std::mem;
-use std::ptr::{self, NonNull};
+use core::cell::{Cell, RefCell};
+use core::mem;
+use core::ptr::{self, NonNull};
 
 struct GcState {
     stats: GcStats,

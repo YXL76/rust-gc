@@ -56,7 +56,7 @@ fn derive_trace(mut s: Structure<'_>) -> proc_macro2::TokenStream {
     // type and encourage people to use Finalize. This implementation will
     // call `Finalize::finalize` if it is safe to do so.
     let drop_impl = s.unbound_impl(
-        quote!(::std::ops::Drop),
+        quote!(::core::ops::Drop),
         quote! {
             fn drop(&mut self) {
                 if ::gc::finalizer_safe() {
