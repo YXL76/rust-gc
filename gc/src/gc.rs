@@ -1,13 +1,17 @@
 use crate::trace::Trace;
-use core::cell::{Cell, RefCell};
+use alloc::{boxed::Box, vec::Vec};
 use core::mem;
-use core::ptr::{self, NonNull};
+use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering};
+use spin::Mutex;
 
 struct GcState {
     stats: GcStats,
     config: GcConfig,
-    boxes_start: Option<NonNull<GcBox<dyn Trace>>>,
+    boxes_start: Option<*mut GcBox<dyn Trace>>,
 }
+
+unsafe impl Send for GcState {}
 
 impl Drop for GcState {
     fn drop(&mut self) {
@@ -21,61 +25,70 @@ impl Drop for GcState {
 
 // Whether or not the thread is currently in the sweep phase of garbage collection.
 // During this phase, attempts to dereference a `Gc<T>` pointer will trigger a panic.
-thread_local!(pub static GC_DROPPING: Cell<bool> = Cell::new(false));
+pub static GC_DROPPING: AtomicBool = AtomicBool::new(false);
 struct DropGuard;
 impl DropGuard {
+    #[must_use]
     fn new() -> DropGuard {
-        GC_DROPPING.with(|dropping| dropping.set(true));
+        GC_DROPPING.store(true, Ordering::SeqCst);
         DropGuard
     }
 }
 impl Drop for DropGuard {
     fn drop(&mut self) {
-        GC_DROPPING.with(|dropping| dropping.set(false));
+        GC_DROPPING.store(false, Ordering::SeqCst);
     }
 }
 pub fn finalizer_safe() -> bool {
-    GC_DROPPING.with(|dropping| !dropping.get())
+    !GC_DROPPING.load(Ordering::SeqCst)
 }
 
 // The garbage collector's internal state.
-thread_local!(static GC_STATE: RefCell<GcState> = RefCell::new(GcState {
-    stats: Default::default(),
-    config: Default::default(),
+static GC_STATE: Mutex<GcState> = Mutex::new(GcState {
+    stats: GcStats {
+        bytes_allocated: 0,
+        collections_performed: 0,
+    },
+    config: GcConfig {
+        used_space_ratio: 0.7,
+        threshold: 100,
+        leak_on_drop: false,
+    },
     boxes_start: None,
-}));
+});
 
 const MARK_MASK: usize = 1 << (usize::BITS - 1);
 const ROOTS_MASK: usize = !MARK_MASK;
 const ROOTS_MAX: usize = ROOTS_MASK; // max allowed value of roots
 
 pub(crate) struct GcBoxHeader {
-    roots: Cell<usize>, // high bit is used as mark flag
-    next: Option<NonNull<GcBox<dyn Trace>>>,
+    roots: Mutex<usize>, // high bit is used as mark flag
+    next: Option<*mut GcBox<dyn Trace>>,
 }
 
 impl GcBoxHeader {
     #[inline]
-    pub fn new(next: Option<NonNull<GcBox<dyn Trace>>>) -> Self {
+    pub const fn new(next: Option<*mut GcBox<dyn Trace>>) -> Self {
         GcBoxHeader {
-            roots: Cell::new(1), // unmarked and roots count = 1
+            roots: Mutex::new(1), // unmarked and roots count = 1
             next,
         }
     }
 
     #[inline]
     pub fn roots(&self) -> usize {
-        self.roots.get() & ROOTS_MASK
+        let roots = self.roots.lock();
+        *roots & ROOTS_MASK
     }
 
     #[inline]
     pub fn inc_roots(&self) {
-        let roots = self.roots.get();
+        let mut roots = self.roots.lock();
 
         // abort if the count overflows to prevent `mem::forget` loops
         // that could otherwise lead to erroneous drops
-        if (roots & ROOTS_MASK) < ROOTS_MAX {
-            self.roots.set(roots + 1); // we checked that this wont affect the high bit
+        if (*roots & ROOTS_MASK) < ROOTS_MAX {
+            *roots += 1; // we checked that this wont affect the high bit
         } else {
             panic!("roots counter overflow");
         }
@@ -83,22 +96,23 @@ impl GcBoxHeader {
 
     #[inline]
     pub fn dec_roots(&self) {
-        self.roots.set(self.roots.get() - 1) // no underflow check
+        *self.roots.lock() -= 1; // no underflow check
     }
 
     #[inline]
     pub fn is_marked(&self) -> bool {
-        self.roots.get() & MARK_MASK != 0
+        let roots = self.roots.lock();
+        *roots & MARK_MASK != 0
     }
 
     #[inline]
     pub fn mark(&self) {
-        self.roots.set(self.roots.get() | MARK_MASK)
+        *self.roots.lock() |= MARK_MASK;
     }
 
     #[inline]
     pub fn unmark(&self) {
-        self.roots.set(self.roots.get() & !MARK_MASK)
+        *self.roots.lock() &= !MARK_MASK;
     }
 }
 
@@ -113,38 +127,36 @@ impl<T: Trace> GcBox<T> {
     /// and appends it to the thread-local `GcBox` chain.
     ///
     /// A `GcBox` allocated this way starts its life rooted.
-    pub(crate) fn new(value: T) -> NonNull<Self> {
-        GC_STATE.with(|st| {
-            let mut st = st.borrow_mut();
+    pub(crate) fn new(value: T) -> *mut Self {
+        let mut st = GC_STATE.lock();
 
-            // XXX We should probably be more clever about collecting
-            if st.stats.bytes_allocated > st.config.threshold {
-                collect_garbage(&mut *st);
+        // XXX We should probably be more clever about collecting
+        if st.stats.bytes_allocated > st.config.threshold {
+            collect_garbage(&mut st);
 
-                if st.stats.bytes_allocated as f64
-                    > st.config.threshold as f64 * st.config.used_space_ratio
-                {
-                    // we didn't collect enough, so increase the
-                    // threshold for next time, to avoid thrashing the
-                    // collector too much/behaving quadratically.
-                    st.config.threshold =
-                        (st.stats.bytes_allocated as f64 / st.config.used_space_ratio) as usize
-                }
+            if st.stats.bytes_allocated as f64
+                > st.config.threshold as f64 * st.config.used_space_ratio
+            {
+                // we didn't collect enough, so increase the
+                // threshold for next time, to avoid thrashing the
+                // collector too much/behaving quadratically.
+                st.config.threshold =
+                    (st.stats.bytes_allocated as f64 / st.config.used_space_ratio) as usize
             }
+        }
 
-            let gcbox = Box::into_raw(Box::new(GcBox {
-                header: GcBoxHeader::new(st.boxes_start.take()),
-                data: value,
-            }));
+        let gcbox = Box::into_raw(Box::new(GcBox {
+            header: GcBoxHeader::new(st.boxes_start.take()),
+            data: value,
+        }));
 
-            st.boxes_start = Some(unsafe { NonNull::new_unchecked(gcbox) });
+        st.boxes_start = Some(gcbox);
 
-            // We allocated some bytes! Let's record it
-            st.stats.bytes_allocated += mem::size_of::<GcBox<T>>();
+        // We allocated some bytes! Let's record it
+        st.stats.bytes_allocated += mem::size_of::<GcBox<T>>();
 
-            // Return the pointer to the newly allocated data
-            unsafe { NonNull::new_unchecked(gcbox) }
-        })
+        // Return the pointer to the newly allocated data
+        gcbox
     }
 }
 
@@ -187,18 +199,18 @@ fn collect_garbage(st: &mut GcState) {
     st.stats.collections_performed += 1;
 
     struct Unmarked {
-        incoming: *mut Option<NonNull<GcBox<dyn Trace>>>,
-        this: NonNull<GcBox<dyn Trace>>,
+        incoming: *mut Option<*mut GcBox<dyn Trace>>,
+        this: *mut GcBox<dyn Trace>,
     }
-    unsafe fn mark(head: &mut Option<NonNull<GcBox<dyn Trace>>>) -> Vec<Unmarked> {
+    unsafe fn mark(head: &mut Option<*mut GcBox<dyn Trace>>) -> Vec<Unmarked> {
         // Walk the tree, tracing and marking the nodes
         let mut mark_head = *head;
         while let Some(node) = mark_head {
-            if (*node.as_ptr()).header.roots() > 0 {
-                (*node.as_ptr()).trace_inner();
+            if (*node).header.roots() > 0 {
+                (*node).trace_inner();
             }
 
-            mark_head = (*node.as_ptr()).header.next;
+            mark_head = (*node).header.next;
         }
 
         // Collect a vector of all of the nodes which were not marked,
@@ -206,15 +218,15 @@ fn collect_garbage(st: &mut GcState) {
         let mut unmarked = Vec::new();
         let mut unmark_head = head;
         while let Some(node) = *unmark_head {
-            if (*node.as_ptr()).header.is_marked() {
-                (*node.as_ptr()).header.unmark();
+            if (*node).header.is_marked() {
+                (*node).header.unmark();
             } else {
                 unmarked.push(Unmarked {
                     incoming: unmark_head,
                     this: node,
                 });
             }
-            unmark_head = &mut (*node.as_ptr()).header.next;
+            unmark_head = &mut (*node).header.next;
         }
         unmarked
     }
@@ -222,12 +234,12 @@ fn collect_garbage(st: &mut GcState) {
     unsafe fn sweep(finalized: Vec<Unmarked>, bytes_allocated: &mut usize) {
         let _guard = DropGuard::new();
         for node in finalized.into_iter().rev() {
-            if (*node.this.as_ptr()).header.is_marked() {
+            if (*node.this).header.is_marked() {
                 continue;
             }
             let incoming = node.incoming;
-            let mut node = Box::from_raw(node.this.as_ptr());
-            *bytes_allocated -= mem::size_of_val::<GcBox<_>>(&*node);
+            let mut node = Box::from_raw(node.this);
+            *bytes_allocated -= mem::size_of_val::<GcBox<_>>(&node);
             *incoming = node.header.next.take();
         }
     }
@@ -238,7 +250,7 @@ fn collect_garbage(st: &mut GcState) {
             return;
         }
         for node in &unmarked {
-            Trace::finalize_glue(&(*node.this.as_ptr()).data);
+            Trace::finalize_glue(&(*node.this).data);
         }
         mark(&mut st.boxes_start);
         sweep(unmarked, &mut st.stats.bytes_allocated);
@@ -249,10 +261,8 @@ fn collect_garbage(st: &mut GcState) {
 ///
 /// This will panic if executed while a collection is currently in progress
 pub fn force_collect() {
-    GC_STATE.with(|st| {
-        let mut st = st.borrow_mut();
-        collect_garbage(&mut *st);
-    });
+    let mut st = GC_STATE.lock();
+    collect_garbage(&mut st);
 }
 
 pub struct GcConfig {
@@ -267,23 +277,11 @@ pub struct GcConfig {
     pub leak_on_drop: bool,
 }
 
-impl Default for GcConfig {
-    fn default() -> Self {
-        Self {
-            used_space_ratio: 0.7,
-            threshold: 100,
-            leak_on_drop: false,
-        }
-    }
-}
-
-#[allow(dead_code)]
+/* #[allow(dead_code)]
 pub fn configure(configurer: impl FnOnce(&mut GcConfig)) {
-    GC_STATE.with(|st| {
-        let mut st = st.borrow_mut();
-        configurer(&mut st.config);
-    })
-}
+    let mut st = GC_STATE.lock();
+    configurer(&mut st.config);
+} */
 
 #[derive(Clone)]
 pub struct GcStats {
@@ -291,16 +289,7 @@ pub struct GcStats {
     pub collections_performed: usize,
 }
 
-impl Default for GcStats {
-    fn default() -> Self {
-        Self {
-            bytes_allocated: 0,
-            collections_performed: 0,
-        }
-    }
-}
-
-#[allow(dead_code)]
+/* #[allow(dead_code)]
 pub fn stats() -> GcStats {
-    GC_STATE.with(|st| st.borrow().stats.clone())
-}
+    GC_STATE.lock().stats.clone()
+} */

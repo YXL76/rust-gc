@@ -4,6 +4,7 @@
 //! It is marked as non-sendable because the garbage collection only occurs
 //! thread-locally.
 
+#![no_std]
 #![cfg_attr(feature = "nightly", feature(coerce_unsized, unsize))]
 
 extern crate alloc;
@@ -82,9 +83,9 @@ impl<T: Trace> Gc<T> {
 
             // When we create a Gc<T>, all pointers which have been moved to the
             // heap no longer need to be rooted, so we unroot them.
-            (*ptr.as_ptr()).value().unroot();
+            (*ptr).value().unroot();
             let gc = Gc {
-                ptr_root: Cell::new(NonNull::new_unchecked(ptr.as_ptr())),
+                ptr_root: Cell::new(NonNull::new_unchecked(ptr)),
                 marker: PhantomData,
             };
             gc.set_root();
@@ -268,7 +269,7 @@ impl<T: Trace + ?Sized> Deref for Gc<T> {
 
     #[inline]
     fn deref(&self) -> &T {
-        &self.inner().value()
+        self.inner().value()
     }
 }
 
@@ -414,10 +415,7 @@ impl BorrowFlag {
     }
 
     fn rooted(self) -> bool {
-        match self.0 & ROOT {
-            0 => false,
-            _ => true,
-        }
+        self.0 & ROOT != 0
     }
 
     fn set_writing(self) -> Self {
@@ -679,14 +677,14 @@ impl<'a, T: ?Sized> GcCellRef<'a, T> {
     /// `GcCellRef::clone(...)`. A `Clone` implementation or a method
     /// would interfere with the use of `c.borrow().clone()` to clone
     /// the contents of a `GcCell`.
-    #[inline]
+    /* #[inline]
     pub fn clone(orig: &GcCellRef<'a, T>) -> GcCellRef<'a, T> {
         orig.flags.set(orig.flags.get().add_reading());
         GcCellRef {
             flags: orig.flags,
             value: orig.value,
         }
-    }
+    } */
 
     /// Makes a new `GcCellRef` from a component of the borrowed data.
     ///
