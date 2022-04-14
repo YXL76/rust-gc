@@ -1,5 +1,6 @@
 use crate::trace::Trace;
 use alloc::{boxed::Box, vec::Vec};
+use core::cell::Cell;
 use core::mem;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -30,17 +31,17 @@ struct DropGuard;
 impl DropGuard {
     #[must_use]
     fn new() -> DropGuard {
-        GC_DROPPING.store(true, Ordering::SeqCst);
+        GC_DROPPING.store(true, Ordering::Relaxed);
         DropGuard
     }
 }
 impl Drop for DropGuard {
     fn drop(&mut self) {
-        GC_DROPPING.store(false, Ordering::SeqCst);
+        GC_DROPPING.store(false, Ordering::Relaxed);
     }
 }
 pub fn finalizer_safe() -> bool {
-    !GC_DROPPING.load(Ordering::SeqCst)
+    !GC_DROPPING.load(Ordering::Relaxed)
 }
 
 // The garbage collector's internal state.
@@ -62,7 +63,7 @@ const ROOTS_MASK: usize = !MARK_MASK;
 const ROOTS_MAX: usize = ROOTS_MASK; // max allowed value of roots
 
 pub(crate) struct GcBoxHeader {
-    roots: Mutex<usize>, // high bit is used as mark flag
+    roots: Cell<usize>, // high bit is used as mark flag
     next: Option<*mut GcBox<dyn Trace>>,
 }
 
@@ -70,25 +71,24 @@ impl GcBoxHeader {
     #[inline]
     pub const fn new(next: Option<*mut GcBox<dyn Trace>>) -> Self {
         GcBoxHeader {
-            roots: Mutex::new(1), // unmarked and roots count = 1
+            roots: Cell::new(1), // unmarked and roots count = 1
             next,
         }
     }
 
     #[inline]
     pub fn roots(&self) -> usize {
-        let roots = self.roots.lock();
-        *roots & ROOTS_MASK
+        self.roots.get() & ROOTS_MASK
     }
 
     #[inline]
     pub fn inc_roots(&self) {
-        let mut roots = self.roots.lock();
+        let roots = self.roots.get();
 
         // abort if the count overflows to prevent `mem::forget` loops
         // that could otherwise lead to erroneous drops
-        if (*roots & ROOTS_MASK) < ROOTS_MAX {
-            *roots += 1; // we checked that this wont affect the high bit
+        if (roots & ROOTS_MASK) < ROOTS_MAX {
+            self.roots.set(roots + 1); // we checked that this wont affect the high bit
         } else {
             panic!("roots counter overflow");
         }
@@ -96,23 +96,22 @@ impl GcBoxHeader {
 
     #[inline]
     pub fn dec_roots(&self) {
-        *self.roots.lock() -= 1; // no underflow check
+        self.roots.set(self.roots.get() - 1) // no underflow check
     }
 
     #[inline]
     pub fn is_marked(&self) -> bool {
-        let roots = self.roots.lock();
-        *roots & MARK_MASK != 0
+        self.roots.get() & MARK_MASK != 0
     }
 
     #[inline]
     pub fn mark(&self) {
-        *self.roots.lock() |= MARK_MASK;
+        self.roots.set(self.roots.get() | MARK_MASK)
     }
 
     #[inline]
     pub fn unmark(&self) {
-        *self.roots.lock() &= !MARK_MASK;
+        self.roots.set(self.roots.get() & !MARK_MASK)
     }
 }
 
