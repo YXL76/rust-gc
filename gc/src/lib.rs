@@ -38,7 +38,7 @@ pub use gc_derive::{Finalize, Trace};
 
 // We re-export the Trace method, as well as some useful internal methods for
 // managing collections or configuring the garbage collector.
-pub use crate::gc::{finalizer_safe, force_collect};
+// pub use crate::gc::{finalizer_safe, force_collect};
 pub use crate::trace::{Finalize, Trace};
 
 #[cfg(feature = "unstable-config")]
@@ -57,6 +57,9 @@ pub struct Gc<T: Trace + ?Sized + 'static> {
     ptr_root: CoreCell<NonNull<GcBox<T>>>,
     marker: PhantomData<Rc<T>>,
 }
+
+// TODO
+unsafe impl<T: Trace + ?Sized + 'static> Send for Gc<T> {}
 
 #[cfg(feature = "nightly")]
 impl<T: Trace + ?Sized + Unsize<U>, U: Trace + ?Sized> CoerceUnsized<Gc<U>> for Gc<T> {}
@@ -85,9 +88,9 @@ impl<T: Trace> Gc<T> {
 
             // When we create a Gc<T>, all pointers which have been moved to the
             // heap no longer need to be rooted, so we unroot them.
-            (*ptr).value().unroot();
+            (*ptr.as_ptr()).value().unroot();
             let gc = Gc {
-                ptr_root: CoreCell::new(NonNull::new_unchecked(ptr)),
+                ptr_root: CoreCell::new(NonNull::new_unchecked(ptr.as_ptr())),
                 marker: PhantomData,
             };
             gc.set_root();
@@ -134,7 +137,8 @@ impl<T: Trace + ?Sized> Gc<T> {
         // within your drop method, meaning that it should be safe.
         //
         // This assert exists just in case.
-        assert!(finalizer_safe());
+        // TODO
+        // assert!(finalizer_safe());
 
         unsafe { &*clear_root_bit(self.ptr_root.get()).as_ptr() }
     }

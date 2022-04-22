@@ -59,9 +59,10 @@ fn derive_trace(mut s: Structure<'_>) -> proc_macro2::TokenStream {
         quote!(::core::ops::Drop),
         quote! {
             fn drop(&mut self) {
-                if ::boa_gc::finalizer_safe() {
+                // TODO
+                // if ::boa_gc::finalizer_safe() {
                     ::boa_gc::Finalize::finalize(self);
-                }
+                // }
             }
         },
     );

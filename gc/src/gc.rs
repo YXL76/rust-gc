@@ -3,20 +3,21 @@ use alloc::{boxed::Box, vec::Vec};
 use core::cell::Cell;
 use core::mem;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::ptr::NonNull;
 use spin::Mutex;
 
 struct GcState {
     stats: GcStats,
     config: GcConfig,
-    boxes_start: Option<*mut GcBox<dyn Trace>>,
+    boxes_start: Option<NonNull<GcBox<dyn Trace>>>,
 }
 
+/// TODO
 unsafe impl Send for GcState {}
 
 impl Drop for GcState {
     fn drop(&mut self) {
-        if !self.config.leak_on_drop {
+        if !LEAK_ON_DROP {
             collect_garbage(self);
         }
         // We have no choice but to leak any remaining nodes that
@@ -26,7 +27,7 @@ impl Drop for GcState {
 
 // Whether or not the thread is currently in the sweep phase of garbage collection.
 // During this phase, attempts to dereference a `Gc<T>` pointer will trigger a panic.
-pub static GC_DROPPING: AtomicBool = AtomicBool::new(false);
+/* pub static GC_DROPPING: AtomicBool = AtomicBool::new(false);
 struct DropGuard;
 impl DropGuard {
     #[must_use]
@@ -39,21 +40,22 @@ impl Drop for DropGuard {
     fn drop(&mut self) {
         GC_DROPPING.store(false, Ordering::Relaxed);
     }
-}
-pub fn finalizer_safe() -> bool {
+} */
+/// TODO, we must insure only the kernel thread can do [collect_garbage]
+/* pub fn finalizer_safe() -> bool {
     !GC_DROPPING.load(Ordering::Relaxed)
-}
+} */
 
 // The garbage collector's internal state.
 static GC_STATE: Mutex<GcState> = Mutex::new(GcState {
     stats: GcStats {
         bytes_allocated: 0,
-        collections_performed: 0,
+        // collections_performed: 0,
     },
     config: GcConfig {
-        used_space_ratio: 0.7,
+        // used_space_ratio: 0.7,
         threshold: 100,
-        leak_on_drop: false,
+        // leak_on_drop: false,
     },
     boxes_start: None,
 });
@@ -64,12 +66,12 @@ const ROOTS_MAX: usize = ROOTS_MASK; // max allowed value of roots
 
 pub(crate) struct GcBoxHeader {
     roots: Cell<usize>, // high bit is used as mark flag
-    next: Option<*mut GcBox<dyn Trace>>,
+    next: Option<NonNull<GcBox<dyn Trace>>>,
 }
 
 impl GcBoxHeader {
     #[inline]
-    pub const fn new(next: Option<*mut GcBox<dyn Trace>>) -> Self {
+    pub const fn new(next: Option<NonNull<GcBox<dyn Trace>>>) -> Self {
         GcBoxHeader {
             roots: Cell::new(1), // unmarked and roots count = 1
             next,
@@ -126,21 +128,18 @@ impl<T: Trace> GcBox<T> {
     /// and appends it to the thread-local `GcBox` chain.
     ///
     /// A `GcBox` allocated this way starts its life rooted.
-    pub(crate) fn new(value: T) -> *mut Self {
+    pub(crate) fn new(value: T) -> NonNull<Self> {
         let mut st = GC_STATE.lock();
 
         // XXX We should probably be more clever about collecting
         if st.stats.bytes_allocated > st.config.threshold {
             collect_garbage(&mut st);
 
-            if st.stats.bytes_allocated as f64
-                > st.config.threshold as f64 * st.config.used_space_ratio
-            {
+            if st.stats.bytes_allocated as f64 > st.config.threshold as f64 * USED_SPACE_RATIO {
                 // we didn't collect enough, so increase the
                 // threshold for next time, to avoid thrashing the
                 // collector too much/behaving quadratically.
-                st.config.threshold =
-                    (st.stats.bytes_allocated as f64 / st.config.used_space_ratio) as usize
+                st.config.threshold = (st.stats.bytes_allocated as f64 / USED_SPACE_RATIO) as usize
             }
         }
 
@@ -148,6 +147,7 @@ impl<T: Trace> GcBox<T> {
             header: GcBoxHeader::new(st.boxes_start.take()),
             data: value,
         }));
+        let gcbox = unsafe { NonNull::new_unchecked(gcbox) };
 
         st.boxes_start = Some(gcbox);
 
@@ -195,21 +195,21 @@ impl<T: Trace + ?Sized> GcBox<T> {
 
 /// Collects garbage.
 fn collect_garbage(st: &mut GcState) {
-    st.stats.collections_performed += 1;
+    // st.stats.collections_performed += 1;
 
     struct Unmarked {
-        incoming: *mut Option<*mut GcBox<dyn Trace>>,
-        this: *mut GcBox<dyn Trace>,
+        incoming: *mut Option<NonNull<GcBox<dyn Trace>>>,
+        this: NonNull<GcBox<dyn Trace>>,
     }
-    unsafe fn mark(head: &mut Option<*mut GcBox<dyn Trace>>) -> Vec<Unmarked> {
+    unsafe fn mark(head: &mut Option<NonNull<GcBox<dyn Trace>>>) -> Vec<Unmarked> {
         // Walk the tree, tracing and marking the nodes
         let mut mark_head = *head;
         while let Some(node) = mark_head {
-            if (*node).header.roots() > 0 {
-                (*node).trace_inner();
+            if (*node.as_ptr()).header.roots() > 0 {
+                (*node.as_ptr()).trace_inner();
             }
 
-            mark_head = (*node).header.next;
+            mark_head = (*node.as_ptr()).header.next;
         }
 
         // Collect a vector of all of the nodes which were not marked,
@@ -217,27 +217,28 @@ fn collect_garbage(st: &mut GcState) {
         let mut unmarked = Vec::new();
         let mut unmark_head = head;
         while let Some(node) = *unmark_head {
-            if (*node).header.is_marked() {
-                (*node).header.unmark();
+            if (*node.as_ptr()).header.is_marked() {
+                (*node.as_ptr()).header.unmark();
             } else {
                 unmarked.push(Unmarked {
                     incoming: unmark_head,
                     this: node,
                 });
             }
-            unmark_head = &mut (*node).header.next;
+            unmark_head = &mut (*node.as_ptr()).header.next;
         }
         unmarked
     }
 
     unsafe fn sweep(finalized: Vec<Unmarked>, bytes_allocated: &mut usize) {
-        let _guard = DropGuard::new();
+        // TODO
+        // let _guard = DropGuard::new();
         for node in finalized.into_iter().rev() {
-            if (*node.this).header.is_marked() {
+            if (*node.this.as_ptr()).header.is_marked() {
                 continue;
             }
             let incoming = node.incoming;
-            let mut node = Box::from_raw(node.this);
+            let mut node = Box::from_raw(node.this.as_ptr());
             *bytes_allocated -= mem::size_of_val::<GcBox<_>>(&node);
             *incoming = node.header.next.take();
         }
@@ -249,31 +250,34 @@ fn collect_garbage(st: &mut GcState) {
             return;
         }
         for node in &unmarked {
-            Trace::finalize_glue(&(*node.this).data);
+            Trace::finalize_glue(&(*node.this.as_ptr()).data);
         }
         mark(&mut st.boxes_start);
         sweep(unmarked, &mut st.stats.bytes_allocated);
     }
 }
 
-/// Immediately triggers a garbage collection on the current thread.
+/* /// Immediately triggers a garbage collection on the current thread.
 ///
 /// This will panic if executed while a collection is currently in progress
 pub fn force_collect() {
     let mut st = GC_STATE.lock();
     collect_garbage(&mut st);
-}
+} */
 
+/// after collection we want the the ratio of used/total to be no
+/// greater than this (the threshold grows exponentially, to avoid
+/// quadratic behavior when the heap is growing linearly with the
+/// number of `new` calls):
+const USED_SPACE_RATIO: f64 = 0.7;
+
+/// For short-running processes it is not always appropriate to run
+/// GC, sometimes it is better to let system free the resources
+const LEAK_ON_DROP: bool = false;
+
+#[repr(transparent)]
 pub struct GcConfig {
     pub threshold: usize,
-    /// after collection we want the the ratio of used/total to be no
-    /// greater than this (the threshold grows exponentially, to avoid
-    /// quadratic behavior when the heap is growing linearly with the
-    /// number of `new` calls):
-    pub used_space_ratio: f64,
-    /// For short-running processes it is not always appropriate to run
-    /// GC, sometimes it is better to let system free the resources
-    pub leak_on_drop: bool,
 }
 
 /* #[allow(dead_code)]
@@ -282,10 +286,11 @@ pub fn configure(configurer: impl FnOnce(&mut GcConfig)) {
     configurer(&mut st.config);
 } */
 
+#[repr(transparent)]
 #[derive(Clone)]
 pub struct GcStats {
     pub bytes_allocated: usize,
-    pub collections_performed: usize,
+    // pub collections_performed: usize,
 }
 
 /* #[allow(dead_code)]
