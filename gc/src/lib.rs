@@ -12,7 +12,7 @@ extern crate alloc;
 use crate::gc::{GcBox, GcBoxHeader};
 use alloc::rc::Rc;
 use core::alloc::Layout;
-use core::cell::{Cell, UnsafeCell};
+use core::cell::{Cell as CoreCell, UnsafeCell};
 use core::cmp::Ordering;
 use core::fmt::{self, Debug, Display};
 use core::hash::{Hash, Hasher};
@@ -30,6 +30,8 @@ mod gc;
 #[cfg(feature = "serde")]
 mod serde;
 mod trace;
+
+pub use crate::{GcCell as Cell, GcCellRef as Ref, GcCellRefMut as RefMut};
 
 #[cfg(feature = "derive")]
 pub use gc_derive::{Finalize, Trace};
@@ -52,7 +54,7 @@ pub use crate::gc::{stats, GcStats};
 ///
 /// See the [module level documentation](./) for more details.
 pub struct Gc<T: Trace + ?Sized + 'static> {
-    ptr_root: Cell<NonNull<GcBox<T>>>,
+    ptr_root: CoreCell<NonNull<GcBox<T>>>,
     marker: PhantomData<Rc<T>>,
 }
 
@@ -85,7 +87,7 @@ impl<T: Trace> Gc<T> {
             // heap no longer need to be rooted, so we unroot them.
             (*ptr).value().unroot();
             let gc = Gc {
-                ptr_root: Cell::new(NonNull::new_unchecked(ptr)),
+                ptr_root: CoreCell::new(NonNull::new_unchecked(ptr)),
                 marker: PhantomData,
             };
             gc.set_root();
@@ -203,7 +205,7 @@ impl<T: Trace + ?Sized> Gc<T> {
         let rc_ptr = set_data_ptr(fake_ptr, (ptr as *mut u8).offset(-(offset as isize)));
 
         let gc = Gc {
-            ptr_root: Cell::new(NonNull::new_unchecked(rc_ptr)),
+            ptr_root: CoreCell::new(NonNull::new_unchecked(rc_ptr)),
             marker: PhantomData,
         };
         gc.set_root();
@@ -255,7 +257,7 @@ impl<T: Trace + ?Sized> Clone for Gc<T> {
         unsafe {
             self.inner().root_inner();
             let gc = Gc {
-                ptr_root: Cell::new(self.ptr_root.get()),
+                ptr_root: CoreCell::new(self.ptr_root.get()),
                 marker: PhantomData,
             };
             gc.set_root();
@@ -460,7 +462,7 @@ impl BorrowFlag {
 ///
 /// This object is a `RefCell` that can be used inside of a `Gc<T>`.
 pub struct GcCell<T: ?Sized + 'static> {
-    flags: Cell<BorrowFlag>,
+    flags: CoreCell<BorrowFlag>,
     cell: UnsafeCell<T>,
 }
 
@@ -469,7 +471,7 @@ impl<T: Trace> GcCell<T> {
     #[inline]
     pub fn new(value: T) -> Self {
         GcCell {
-            flags: Cell::new(BORROWFLAG_INIT),
+            flags: CoreCell::new(BORROWFLAG_INIT),
             cell: UnsafeCell::new(value),
         }
     }
@@ -664,7 +666,7 @@ unsafe impl<T: Trace + ?Sized> Trace for GcCell<T> {
 
 /// A wrapper type for an immutably borrowed value from a `GcCell<T>`.
 pub struct GcCellRef<'a, T: ?Sized + 'static> {
-    flags: &'a Cell<BorrowFlag>,
+    flags: &'a CoreCell<BorrowFlag>,
     value: &'a T,
 }
 

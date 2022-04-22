@@ -1,5 +1,5 @@
 [package]
-name = "gc"
+name = "boa_gc"
 version = "0.4.1"
 authors = [
     "Manish Goregaokar <manishsmail@gmail.com>",
